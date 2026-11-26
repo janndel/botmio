@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { prepareRichResponseMessage } = require('@mrzkyzdnii/baileys');
+const { prepareRichResponseMessage } = require('@itsliaaa/baileys');
 
 const HOME = process.env.HOME;
 const NOMBRE_BOT = 'DARHEART';
@@ -101,6 +101,31 @@ function dividirTexto(texto, maximo) {
     return partes;
 }
 
+async function enviarRichTexto(sock, chatId, rich, opciones = {}) {
+    const {
+        disclaimerText = '',
+        footerText = `${NOMBRE_BOT} — by JANNDEL`,
+        mentions = []
+    } = opciones;
+    const extra = mentions.length ? { mentions } : {};
+
+    try {
+        await sock.sendMessage(chatId, {
+            disclaimerText,
+            richResponse: rich,
+            footerText,
+            ...extra
+        });
+        return;
+    } catch (error) {
+        console.log('⚠️ Rich no soportado, usando texto:', error.message);
+        const plano = textoDesdeRich(rich);
+        for (const parte of dividirTexto(plano, MAX_TEXTO)) {
+            await sock.sendMessage(chatId, { text: parte, ...extra });
+        }
+    }
+}
+
 async function enviarRich(sock, chatId, rich, opciones = {}) {
     const {
         disclaimerText = '',
@@ -111,6 +136,16 @@ async function enviarRich(sock, chatId, rich, opciones = {}) {
     } = opciones;
     const extra = mentions.length ? { mentions } : {};
 
+    // Ruta rápida: enviar la imagen desde el buffer local (la sube por los servidores de WhatsApp)
+    // en vez de que el cliente tenga que descargarla desde un host externo.
+    if (imagen) {
+        try {
+            await sock.sendMessage(chatId, { image: imagen });
+        } catch (error) {
+            console.log('⚠️ No se pudo enviar la foto:', error.message);
+        }
+        return await enviarRichTexto(sock, chatId, rich, { disclaimerText, footerText, mentions });
+    }
     if (imagenUrl) {
         try {
             const wrapper = construirRichConImagen(rich, disclaimerText, footerText, imagenUrl);
@@ -120,27 +155,7 @@ async function enviarRich(sock, chatId, rich, opciones = {}) {
             console.log('⚠️ Rich con imagen inline no soportado, usando foto separada:', error.message);
         }
     }
-    if (imagen) {
-        try {
-            await sock.sendMessage(chatId, { image: imagen });
-        } catch (error) {
-            console.log('⚠️ No se pudo enviar la foto:', error.message);
-        }
-    }
-    try {
-        await sock.sendMessage(chatId, {
-            disclaimerText,
-            richResponse: rich,
-            footerText,
-            ...extra
-        });
-    } catch (error) {
-        console.log('⚠️ Rich no soportado, usando texto:', error.message);
-        const plano = textoDesdeRich(rich);
-        for (const parte of dividirTexto(plano, MAX_TEXTO)) {
-            await sock.sendMessage(chatId, { text: parte, ...extra });
-        }
-    }
+    return await enviarRichTexto(sock, chatId, rich, { disclaimerText, footerText, mentions });
 }
 
 module.exports = {

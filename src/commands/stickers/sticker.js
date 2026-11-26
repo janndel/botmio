@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const WebP = require('node-webpmux');
+const { prepareWAMessageMedia, generateWAMessageFromContent } = require('@itsliaaa/baileys');
 
 const PACK_FILE = path.join(process.env.HOME, 'packname.json');
 
@@ -48,9 +49,44 @@ async function addMetadata(webpPath, packName, author) {
     }
 }
 
+function ejecutar(cmd, timeout = 120000) {
+    return new Promise((resolve, reject) => {
+        exec(cmd, { timeout, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
+            if (error) {
+                console.error('FFmpeg error:', String(stderr || error.message).slice(-500));
+                reject(error);
+            } else {
+                resolve();
+            }
+        });
+    });
+}
+
+async function enviarStickerConAudio(sock, chatId, stickerBuffer, audioBuffer, replyOpts) {
+    const opts = { upload: sock.waUploadToServer, logger: sock.logger };
+
+    const { stickerMessage } = await prepareWAMessageMedia({ sticker: stickerBuffer }, opts);
+    const { audioMessage } = await prepareWAMessageMedia({
+        audio: audioBuffer,
+        mimetype: 'audio/ogg; codecs=opus',
+        ptt: false
+    }, opts);
+
+    stickerMessage.audioMessage = audioMessage;
+
+    const fullMsg = generateWAMessageFromContent(chatId, { stickerMessage }, {
+        userJid: sock.user?.id,
+        quoted: replyOpts?.quoted
+    });
+
+    await sock.relayMessage(chatId, fullMsg.message, { messageId: fullMsg.key.id });
+    return fullMsg;
+}
+
 module.exports = {
     name: 'sticker',
     alias: ['s', 'stiker'],
+    desc: 'Crea sticker (respondiendo a imagen, video o sticker; videos con audio).',
     async execute(sock, msg, args, { chatId, downloadMediaMessage }) {
         const ctx = msg.message?.extendedTextMessage?.contextInfo;
         const quoted = ctx?.quotedMessage;
@@ -71,7 +107,11 @@ module.exports = {
         const stamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         const inputPath = path.join(tmpDir, `in_${stamp}`);
         const outputPath = path.join(tmpDir, `out_${stamp}.webp`);
+        const audioPath = path.join(tmpDir, `audio_${stamp}.ogg`);
         const packData = cargarPack();
+        const replyOpts = ctx?.stanzaId
+            ? { quoted: { key: { remoteJid: chatId, fromMe: false, id: ctx.stanzaId, participant: ctx.participant || msg.key.participant }, message: quoted } }
+            : {};
 
         try {
             const key = ctx?.stanzaId ? { ...msg.key, id: ctx.stanzaId } : msg.key;
@@ -89,46 +129,80 @@ module.exports = {
 
             if (tipo === 'sticker') {
                 fs.writeFileSync(outputPath, buffer);
-            } else {
-                fs.writeFileSync(inputPath, buffer);
-
-                const filtro = `scale=512:512:force_original_aspect_ratio=increase,` +
-                               `crop=512:512,setsar=1,format=yuva420p`;
-
-                const cmd = tipo === 'video'
-                    ? `ffmpeg -i "${inputPath}" -t 3 ` +
-                      `-vf "${filtro},fps=15" ` +
-                      `-c:v libwebp_anim -lossless 0 -q:v 75 -loop 0 -an -fps_mode passthrough ` +
-                      `-pix_fmt yuva420p "${outputPath}" -y`
-                    : `ffmpeg -i "${inputPath}" ` +
-                      `-vf "${filtro}" ` +
-                      `-c:v libwebp -lossless 0 -q:v 80 ` +
-                      `-pix_fmt yuva420p "${outputPath}" -y`;
-
-                console.log(`🎨 Creando sticker (pack: ${packData.nombre} | ${packData.autor})...`);
-                await new Promise((resolve, reject) => {
-                    exec(cmd, { timeout: 60000 }, (error, stderr) => {
-                        if (error) {
-                            console.error('FFmpeg error:', stderr);
-                            reject(error);
-                        } else {
-                            resolve();
-                        }
-                    });
-                });
+                await addMetadata(outputPath, packData.nombre, packData.autor);
+                const stickerBuffer = fs.readFileSync(outputPath);
+                await sock.sendMessage(chatId, { sticker: stickerBuffer }, replyOpts);
+                console.log('✅ Sticker enviado con firma');
+                return;
             }
 
+            fs.writeFileSync(inputPath, buffer);
+
+            const filtro = `scale=512:512:force_original_aspect_ratio=increase,` +
+                           `crop=512:512,setsar=1,format=yuva420p`;
+            const filtroAnimado = `scale=512:512:force_original_aspect_ratio=increase,` +
+                           `crop=512:512,setsar=1`;
+
+            if (tipo === 'video') {
+                console.log(`🎨 Creando sticker animado con audio (pack: ${packData.nombre} | ${packData.autor})...`);
+                const intentos = [
+                    { t: 6, fps: 12, q: 60 },
+                    { t: 6, fps: 10, q: 40 },
+                    { t: 5, fps: 10, q: 35 }
+                ];
+                const LIMITE = 480 * 1024;
+                let duracion = intentos[0].t;
+                let tamano = 0;
+                for (const it of intentos) {
+                    await ejecutar(
+                        `ffmpeg -i "${inputPath}" -t ${it.t} ` +
+                        `-vf "${filtroAnimado},fps=${it.fps}" ` +
+                        `-c:v libwebp -lossless 0 -q:v ${it.q} -loop 0 -pix_fmt yuva420p ` +
+                        `"${outputPath}" -y`
+                    );
+                    tamano = fs.statSync(outputPath).size;
+                    duracion = it.t;
+                    console.log(`   🎞️ ${it.t}s fps=${it.fps} q=${it.q} → ${(tamano / 1024).toFixed(0)} KB`);
+                    if (tamano <= LIMITE) break;
+                }
+                await ejecutar(
+                    `ffmpeg -i "${inputPath}" -vn -t ${duracion} -c:a libopus -ac 1 -b:a 32k ` +
+                    `"${audioPath}" -y`
+                );
+                await addMetadata(outputPath, packData.nombre, packData.autor);
+
+                const stickerBuffer = fs.readFileSync(outputPath);
+                const audioBuffer = fs.readFileSync(audioPath);
+
+                try {
+                    await enviarStickerConAudio(sock, chatId, stickerBuffer, audioBuffer, replyOpts);
+                    console.log('✅ Sticker con audio enviado');
+                } catch (e) {
+                    console.error('⚠️ Falló el sticker con audio, enviando sin audio:', e.message);
+                    await sock.sendMessage(chatId, { sticker: stickerBuffer }, replyOpts);
+                    console.log('✅ Sticker animado enviado (sin audio)');
+                }
+                return;
+            }
+
+            console.log(`🎨 Creando sticker (pack: ${packData.nombre} | ${packData.autor})...`);
+            await ejecutar(
+                `ffmpeg -i "${inputPath}" ` +
+                `-vf "${filtro}" ` +
+                `-c:v libwebp -lossless 0 -q:v 80 -pix_fmt yuva420p ` +
+                `"${outputPath}" -y`
+            );
             console.log(`🏷️ Añadiendo firma (${packData.nombre} | ${packData.autor})...`);
             await addMetadata(outputPath, packData.nombre, packData.autor);
 
             const stickerBuffer = fs.readFileSync(outputPath);
-            await sock.sendMessage(chatId, { sticker: stickerBuffer });
+            await sock.sendMessage(chatId, { sticker: stickerBuffer }, replyOpts);
             console.log('✅ Sticker enviado con firma');
         } catch (error) {
             console.error('Error creando sticker:', error.message);
             await sock.sendMessage(chatId, { text: '❌ No se pudo crear el sticker.' });
         } finally {
-            for (const p of [inputPath, outputPath]) {
+            for (const p of [inputPath, outputPath, audioPath]) {
                 try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch (e) {}
             }
         }

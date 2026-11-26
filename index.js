@@ -21,7 +21,7 @@ try {
         fsInicio.renameSync(logInicio, `${logInicio}.1`);
     }
 } catch (e) {}
-const { makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, Browsers, fetchLatestBaileysVersion } = require('@mrzkyzdnii/baileys');
+const { makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, Browsers, fetchLatestBaileysVersion } = require('@itsliaaa/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');

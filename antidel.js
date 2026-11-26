@@ -7,7 +7,7 @@ const {
   getContentType,
   proto,
   WAMessageStubType,
-} = require('@mrzkyzdnii/baileys')
+} = require('@itsliaaa/baileys')
 
 const CACHE_MAX = 1500
 const CACHE_TTL = 72 * 60 * 60 * 1000

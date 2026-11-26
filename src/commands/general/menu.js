@@ -33,7 +33,13 @@ function normalizar(texto) {
         .replace(/[\u0300-\u036f]/g, '');
 }
 
+let escaneoMenu = { porCarpeta: null, timestamp: 0 };
+const TTL_ESCANEO_MENU = 30000;
+
 function escanearComandos() {
+    if (escaneoMenu.porCarpeta && (Date.now() - escaneoMenu.timestamp) < TTL_ESCANEO_MENU) {
+        return escaneoMenu.porCarpeta;
+    }
     const porCarpeta = {};
     try {
         for (const carpeta of fs.readdirSync(COMMANDS_DIR)) {
@@ -54,7 +60,9 @@ function escanearComandos() {
         }
     } catch (error) {
         console.log('⚠️ menu.js error:', error.message);
+        return porCarpeta;
     }
+    escaneoMenu = { porCarpeta, timestamp: Date.now() };
     return porCarpeta;
 }
 
